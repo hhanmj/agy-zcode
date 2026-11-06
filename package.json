@@ -1,0 +1,23 @@
+{
+  "name": "agy-zcode-plugin-build",
+  "private": true,
+  "version": "0.3.2",
+  "description": "Builds the ZCode plugin (MCP server) that delegates tasks to Google Antigravity CLI (agy).",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node build.mjs && node --test \"test/*.test.mjs\"",
+    "install:status": "node scripts/local-install.mjs status",
+    "install:local": "node scripts/local-install.mjs install"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.28.2",
+    "typescript": "5.9"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^2.0.4"
+  }
+}

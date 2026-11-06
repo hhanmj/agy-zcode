@@ -1,0 +1,35 @@
+{
+  "mcpServers": {
+    "agy": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${ZCODE_PLUGIN_ROOT}/server/agy-mcp.mjs"
+      ],
+      "env": {
+        "AGY_MCP_DATA_DIR": "${ZCODE_PLUGIN_DATA}",
+        "AGY_MCP_COMMAND": "${user_config.agyPath}",
+        "AGY_MCP_PROXY": "${user_config.proxy}",
+        "AGY_MCP_MODEL": "${user_config.model}",
+        "AGY_MCP_EFFORT": "${user_config.effort}",
+        "AGY_MCP_PRINT_TIMEOUT_MS": "${user_config.printTimeoutMs}",
+        "AGY_MCP_BACKGROUND_TIMEOUT_MS": "${user_config.backgroundTimeoutMs}",
+        "AGY_MCP_SKIP_PERMISSIONS": "${user_config.skipPermissions}",
+        "AGY_MCP_AVOID_BROWSER": "${user_config.avoidBrowser}",
+        "AGY_MCP_ADD_DIRS": "${user_config.addDirs}",
+        "AGY_GATEWAY_AUTOSTART": "${user_config.gatewayAutostart}",
+        "AGY_GATEWAY_PORT": "${user_config.gatewayPort}",
+        "AGY_MCP_SUPERVISION": "${user_config.supervision}",
+        "AGY_MCP_SUPERVISION_BUILTIN_RULES": "${user_config.supervisionBuiltinRules}",
+        "AGY_MCP_SUPERVISION_DENY_COMMANDS": "${user_config.supervisionDenyCommands}",
+        "AGY_MCP_SUPERVISION_STOP_CHECK": "${user_config.supervisionStopCheck}",
+        "AGY_MCP_SUPERVISION_STOP_CHECK_TIMEOUT_MS": "${user_config.supervisionStopCheckTimeoutMs}",
+        "AGY_MCP_SUPERVISION_MAX_REWORKS": "${user_config.supervisionMaxReworks}",
+        "AGY_MCP_PERSISTENT": "${user_config.persistentSessions}",
+        "AGY_MCP_PERSISTENT_IDLE_MS": "${user_config.persistentIdleMs}"
+      },
+      "isolation": "workspace",
+      "timeoutMs": 900000
+    }
+  }
+}

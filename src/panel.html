@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agy 任务与账号</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c232d;
+    --border: #2b3542;
+    --text: #e6edf3;
+    --muted: #8b98a9;
+    --accent: #6e8bff;
+    --accent-soft: #6e8bff22;
+    --green: #4cc38a;
+    --green-soft: #4cc38a1f;
+    --red: #f06a5f;
+    --red-soft: #f06a5f1a;
+    --amber: #e0a83c;
+    --amber-soft: #e0a83c1f;
+    --blue: #4fb3ff;
+    --blue-soft: #4fb3ff1f;
+    --radius: 10px;
+  }
+  html[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --panel-2: #f0f2f6;
+    --border: #dde2ea;
+    --text: #1d2733;
+    --muted: #64738a;
+    --accent: #4b62d6;
+    --accent-soft: #4b62d614;
+    --green: #238a5b;
+    --green-soft: #238a5b12;
+    --red: #c94438;
+    --red-soft: #c9443810;
+    --amber: #9a6d12;
+    --amber-soft: #9a6d1214;
+    --blue: #1677c8;
+    --blue-soft: #1677c812;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.6 var(--font-family, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif); color: var(--text); background: var(--bg); }
+  svg { display: block; flex: none; }
+  .icon { width: 15px; height: 15px; }
+  .icon-lg { width: 30px; height: 30px; }
+  .hidden { display: none !important; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .tiny { font-size: 11px; }
+  .mono { font-family: var(--font-family-mono, Consolas, "Cascadia Mono", monospace); }
+
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; letter-spacing: .02em; }
+  .brand .mark { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; background: linear-gradient(135deg, #6e8bff, #9d6eff); color: #fff; }
+  nav { display: flex; gap: 4px; background: var(--panel-2); padding: 3px; border-radius: 9px; border: 1px solid var(--border); }
+  nav button { display: flex; align-items: center; gap: 6px; border: none; background: transparent; padding: 4px 12px; border-radius: 7px; color: var(--muted); }
+  nav button.on { background: var(--accent-soft); color: var(--accent); }
+  .spacer { flex: 1; }
+  .version { color: var(--muted); font-size: 11px; }
+
+  button { font: inherit; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); cursor: pointer; transition: background .12s, border-color .12s, opacity .12s; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.icon-btn { padding: 5px 7px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  html[data-theme="light"] button.primary { color: #fff; }
+  button.primary:hover { filter: brightness(1.1); }
+  button.danger { color: var(--red); }
+  button.danger:hover { border-color: var(--red); background: var(--red-soft); }
+  button.ghost { background: transparent; }
+
+  main { padding: 14px 16px 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+  .card-pad { padding: 12px 14px; }
+  .section-title { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--muted); margin: 18px 0 8px; }
+  .section-title:first-child { margin-top: 0; }
+  .cols { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(0, 1.5fr); gap: 14px; align-items: start; }
+  @media (max-width: 720px) { .cols { grid-template-columns: 1fr; } }
+
+  .notice { display: flex; gap: 8px; align-items: flex-start; padding: 9px 12px; border-radius: var(--radius); margin-bottom: 12px; border: 1px solid var(--border); background: var(--panel); }
+  .notice.error { border-color: var(--red); background: var(--red-soft); color: var(--red); white-space: pre-wrap; }
+  .notice.info { border-color: var(--blue); background: var(--blue-soft); color: var(--blue); }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+  .stat { padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .stat .num { font-size: 22px; font-weight: 650; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .stat .num.running { color: var(--blue); }
+  .stat .num.done { color: var(--green); }
+  .stat .num.fail { color: var(--red); }
+  .stat .cap { font-size: 11px; color: var(--muted); }
+
+  .row { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--panel); margin-bottom: 8px; cursor: pointer; transition: border-color .12s, background .12s; }
+  .row:hover { border-color: var(--accent); }
+  .row.selected { border-color: var(--accent); background: var(--accent-soft); }
+  .row .body { min-width: 0; flex: 1; }
+  .row .title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .meta { color: var(--muted); font-size: 11px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .meta .sep { margin: 0 5px; opacity: .5; }
+
+  .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; line-height: 1.4; padding: 1px 8px; border-radius: 20px; white-space: nowrap; background: var(--panel-2); color: var(--muted); border: 1px solid transparent; }
+  .badge.running { background: var(--blue-soft); color: var(--blue); }
+  .badge.completed, .badge.active { background: var(--green-soft); color: var(--green); }
+  .badge.failed, .badge.timeout { background: var(--red-soft); color: var(--red); }
+  .badge.cancelled, .badge.exhausted { background: var(--amber-soft); color: var(--amber); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge.running .dot { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+  .empty { text-align: center; color: var(--muted); padding: 26px 12px; }
+  .empty .icon-lg { margin: 0 auto 10px; opacity: .55; }
+
+  .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+  .detail-head strong { font-size: 14px; }
+  .kv { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 11px; margin-bottom: 10px; }
+  pre.log { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.6 var(--font-family-mono, Consolas, monospace); margin: 8px 0; }
+  pre.err-text { background: var(--red-soft); border: 1px solid var(--red); color: var(--red); border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; font-size: 12px; }
+  .file-line { display: flex; gap: 8px; font-size: 12px; padding: 2px 0; }
+  .file-status { width: 16px; text-align: center; font-weight: 600; }
+  .file-status.modified { color: var(--amber); }
+  .file-status.added { color: var(--green); }
+  .file-status.deleted { color: var(--red); }
+  .diff-nums { display: inline-flex; gap: 8px; font-size: 12px; }
+  .diff-nums .add { color: var(--green); }
+  .diff-nums .del { color: var(--red); }
+
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  textarea, input[type=text], select { width: 100%; font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 70px; }
+  select { width: auto; padding: 4px 8px; }
+  .field-label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 4px; }
+  #new-task { margin-top: 16px; }
+  #followup-box { margin-top: 10px; }
+
+  .live-card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; margin-bottom: 14px; }
+  .avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: 14px; text-transform: uppercase; }
+  .live-card .who { flex: 1; min-width: 0; }
+  .live-card .who .email { font-weight: 550; overflow: hidden; text-overflow: ellipsis; }
+  .live-card .who .cap { font-size: 11px; color: var(--muted); }
+
+  .switch { position: relative; display: inline-block; width: 34px; height: 20px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; border-radius: 20px; background: var(--border); transition: background .15s; }
+  .slider::before { content: ""; position: absolute; width: 14px; height: 14px; border-radius: 50%; left: 3px; top: 3px; background: #fff; transition: transform .15s; }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(14px); }
+  .rotation-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; }
+  .rotation-bar .label { display: flex; align-items: center; gap: 8px; font-weight: 550; }
+  .rotation-bar .hint { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+
+  .acct { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .acct:last-child { border-bottom: none; }
+  .acct .who { flex: 1; min-width: 160px; }
+  .acct .email { font-weight: 550; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .acct .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .acct-actions { display: flex; gap: 6px; }
+  .steps { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 14px; }
+  .step { display: flex; gap: 10px; align-items: flex-start; font-size: 12px; color: var(--muted); }
+  .step .n { width: 18px; height: 18px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--border); display: grid; place-items: center; font-size: 11px; color: var(--text); flex: none; margin-top: 1px; }
+  .footnote { color: var(--muted); font-size: 11px; margin-top: 12px; display: flex; gap: 6px; align-items: flex-start; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="mark"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7z"/></svg></span>agy</div>
+  <nav>
+    <button id="tab-tasks" data-tab="tasks"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>任务</button>
+    <button id="tab-accounts" data-tab="accounts"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>账号</button>
+  </nav>
+  <span class="spacer"></span>
+  <span id="version" class="version"></span>
+  <button class="icon-btn ghost" data-act="refresh" title="刷新"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg></button>
+</header>
+<main>
+  <div id="notice" class="hidden"></div>
+  <section id="pane-tasks">
+    <div id="task-stats"></div>
+    <div class="cols">
+      <div id="task-list"></div>
+      <div id="task-detail"></div>
+    </div>
+    <div id="new-task" class="card card-pad">
+      <div class="section-title"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新建后台任务</div>
+      <label class="field-label" for="new-label">任务名称</label>
+      <input type="text" id="new-label" placeholder="例如：修复登录页的样式错位">
+      <label class="field-label" for="new-prompt">任务内容</label>
+      <textarea id="new-prompt" rows="4" placeholder="写清目标、涉及文件、约束和验收标准。agy 看不到当前对话，需要自包含的描述。"></textarea>
+      <div class="actions"><button class="primary" data-act="new"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 3 14 9-14 9z"/></svg>启动后台任务</button></div>
+    </div>
+  </section>
+  <section id="pane-accounts" class="hidden">
+    <div id="accounts"></div>
+  </section>
+</main>
+<script type="module" src="./panel.js"></script>
+</body>
+</html>

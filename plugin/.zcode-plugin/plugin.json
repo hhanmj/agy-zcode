@@ -1,0 +1,155 @@
+{
+  "name": "agy-delegate",
+  "version": "0.3.2",
+  "description": "Delegate coding tasks to Google Antigravity CLI (agy) from ZCode: foreground or background runs, follow-ups in the same agy conversation, cancel, independent change evidence and execution traces. Also runs a local Anthropic-compatible model gateway so agy models can be registered as ZCode custom providers and used by native subagents.",
+  "description_i18n": {
+    "en": "Delegate coding tasks to Google Antigravity CLI (agy) from ZCode: foreground or background runs, follow-ups in the same agy conversation, cancel, independent change evidence and execution traces. Also runs a local Anthropic-compatible model gateway so agy models can be registered as ZCode custom providers and used by native subagents.",
+    "zh-CN": "在 ZCode 里把编程任务委派给 Google Antigravity CLI（agy）：前台或后台运行、在同一 agy 会话里续聊、取消任务、独立的改动证据和执行轨迹。另带本地 Anthropic 兼容模型网关，可把 agy 模型注册为 ZCode 自定义 Provider，供原生子代理使用。"
+  },
+  "author": {
+    "name": "dsh-subagent-antigravity contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agy",
+    "antigravity",
+    "gemini",
+    "delegation",
+    "subagent",
+    "mcp"
+  ],
+  "skills": "skills",
+  "agents": "agents",
+  "mcpServers": ".mcp.json",
+  "ui": {
+    "surfaces": [
+      {
+        "id": "agy-panel",
+        "title": {
+          "en": "agy tasks & accounts",
+          "zh-CN": "agy 任务与账号"
+        },
+        "server": "agy",
+        "resourceUri": "ui://agy-delegate/panel.html",
+        "availability": "session",
+        "icon": "zap"
+      }
+    ]
+  },
+  "userConfig": {
+    "agyPath": {
+      "title": "agy executable",
+      "description": "Command name or absolute path of agy. Empty: find agy on PATH, then %LOCALAPPDATA%\\agy\\bin and ~/.local/bin.",
+      "type": "string",
+      "default": ""
+    },
+    "proxy": {
+      "title": "Proxy for agy",
+      "description": "Proxy URL for agy (e.g. http://127.0.0.1:7890). Empty: AGY_PROXY, then <plugin data>/agy-proxy.txt, then ~/.dsh/agy-proxy.txt.",
+      "type": "string",
+      "default": ""
+    },
+    "model": {
+      "title": "Default model",
+      "description": "Default agy model id (see the agy_models tool). Empty: agy's own default.",
+      "type": "string",
+      "default": ""
+    },
+    "effort": {
+      "title": "Default effort",
+      "description": "low | medium | high | xhigh | max, for models with effort variants. Empty: model default.",
+      "type": "string",
+      "default": ""
+    },
+    "printTimeoutMs": {
+      "title": "Foreground ceiling (ms)",
+      "description": "Longest foreground run; capped at 780000 so one call fits the 15-minute MCP timeout. Use background runs for longer work.",
+      "type": "number",
+      "default": 300000
+    },
+    "backgroundTimeoutMs": {
+      "title": "Background ceiling (ms)",
+      "description": "Longest background run (max 21600000).",
+      "type": "number",
+      "default": 3600000
+    },
+    "skipPermissions": {
+      "title": "Auto-approve agy tools",
+      "description": "Pass --dangerously-skip-permissions. Headless agy cannot ask for approval, so real edits and commands need this.",
+      "type": "boolean",
+      "default": true
+    },
+    "avoidBrowser": {
+      "title": "Tell agy to avoid browser tools",
+      "description": "Headless agy browser tools can hang a run; agy verifies by reading files and running commands instead.",
+      "type": "boolean",
+      "default": true
+    },
+    "addDirs": {
+      "title": "Extra directories",
+      "description": "Absolute directories added to every run (--add-dir), separated by semicolons.",
+      "type": "string",
+      "default": ""
+    },
+    "gatewayAutostart": {
+      "title": "Model gateway autostart",
+      "description": "Keep a local Anthropic-compatible gateway (http://127.0.0.1:<port>) alive so agy models can be registered as ZCode custom model providers and used by native subagents. The gateway token is <plugin data>/gateway-token.txt.",
+      "type": "boolean",
+      "default": true
+    },
+    "gatewayPort": {
+      "title": "Model gateway port",
+      "description": "Port for the local model gateway (default 8378). Changing it requires re-registering the ZCode provider baseUrl.",
+      "type": "number",
+      "default": 8378
+    },
+    "supervision": {
+      "title": "Supervise agy tool calls (opt-in)",
+      "description": "Install a command hook in each agy run that blocks writes outside the workspace and add-dirs, reads of credential/agy state paths, and denied commands (fail-closed). A guardrail, not a security boundary. Off by default.",
+      "type": "boolean",
+      "default": false
+    },
+    "supervisionBuiltinRules": {
+      "title": "Supervision: built-in command rules",
+      "description": "With supervision on, also deny git push, wholesale discards (git reset --hard, git clean -f), package/release publishing, and piping downloads into a shell.",
+      "type": "boolean",
+      "default": true
+    },
+    "supervisionDenyCommands": {
+      "title": "Supervision: extra denied commands",
+      "description": "Case-insensitive regular expressions matched against agy run_command lines, separated by semicolons. Only used with supervision on.",
+      "type": "string",
+      "default": ""
+    },
+    "supervisionStopCheck": {
+      "title": "Supervision: stop check command",
+      "description": "Command run in the workspace when agy wants to stop (e.g. npm test). Non-zero exit sends agy back to fix it, up to the rework limit. Empty: no check. Only used with supervision on.",
+      "type": "string",
+      "default": ""
+    },
+    "supervisionStopCheckTimeoutMs": {
+      "title": "Supervision: stop check timeout (ms)",
+      "description": "Longest a stop check may run (1000-600000).",
+      "type": "number",
+      "default": 120000
+    },
+    "supervisionMaxReworks": {
+      "title": "Supervision: max reworks",
+      "description": "How many times a failing stop check may send agy back to work (0-10).",
+      "type": "number",
+      "default": 2
+    },
+    "persistentSessions": {
+      "title": "Persistent agy sessions (opt-in)",
+      "description": "Keep one streaming agy process per task alive between follow-ups instead of starting a new process per turn. Off by default; one-shot runs remain the fallback.",
+      "type": "boolean",
+      "default": false
+    },
+    "persistentIdleMs": {
+      "title": "Persistent session idle timeout (ms)",
+      "description": "Close an idle persistent agy process after this long (0 = never). Only used with persistent sessions on.",
+      "type": "number",
+      "default": 600000
+    }
+  }
+}

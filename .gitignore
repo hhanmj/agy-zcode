@@ -1,0 +1,31 @@
+# Build and dependencies
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.nyc_output/
+*.log
+npm-debug.log*
+
+# Local install state, backups and private files
+.install-backups/
+.panel-shots/
+.dsh/
+*.local
+*.local.mjs
+*.session*
+*.credentials*
+*.secrets*
+*.key
+*.pem
+*.p12
+*.pfx
+*.token
+*.env
+.env.*
+!.env.example
+config.local.*
+private/
+secrets/
+agy-conversations.json
+gateway-token.txt
