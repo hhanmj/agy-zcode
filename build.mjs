@@ -28,7 +28,9 @@ rmSync(market, { recursive: true, force: true })
 mkdirSync(pluginDir, { recursive: true })
 cpSync(template, pluginDir, { recursive: true, filter: (src) => src !== templateMarketplace })
 writeFileSync(join(market, 'marketplace.json'), JSON.stringify(marketplace, null, 2) + '\n')
-copyFileSync(join(here, '..', 'LICENSE'), join(pluginDir, 'LICENSE'))
+const license = [join(here, 'LICENSE'), join(here, '..', 'LICENSE')].find((file) => existsSync(file))
+if (license === undefined) throw new Error('LICENSE not found in repo root or parent')
+copyFileSync(license, join(pluginDir, 'LICENSE'))
 
 await build({
   entryPoints: [join(here, 'src', 'server.ts')],
@@ -61,8 +63,8 @@ await build({
 // server/supervisor-hook.mjs into each supervised run's directory and agy runs
 // it with plain node, so it must be self-contained (Node built-ins only).
 // A ZCode-specific hook in zcode/src wins; otherwise reuse the shared DSH one.
-const hookEntry = [join(here, 'src', 'supervisor-hook.ts'), join(here, '..', 'src', 'supervisor-hook.ts')].find((file) => existsSync(file))
-if (hookEntry === undefined) throw new Error('supervisor-hook.ts not found in zcode/src or ../src')
+const hookEntry = [join(here, 'src', 'supervisor-hook.ts'), join(here, 'shared', 'supervisor-hook.ts'), join(here, '..', 'src', 'supervisor-hook.ts')].find((file) => existsSync(file))
+if (hookEntry === undefined) throw new Error('supervisor-hook.ts not found in src/, shared/ or ../src')
 await build({
   entryPoints: [hookEntry],
   bundle: true,

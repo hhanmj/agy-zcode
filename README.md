@@ -52,6 +52,24 @@ See [plugin/README.md](plugin/README.md) for the full walkthrough: upgrades
 (opt-in command policy for agy), persistent sessions, and the account
 library.
 
+### Agent-driven deploy
+
+The only step a coding agent cannot do for you is the interactive Google
+sign-in. Install `agy` and sign in yourself first (your account's tier
+decides which models you get), then paste this into ZCode or any agent with
+shell access:
+
+> Clone https://github.com/hhanmj/agy-zcode, run `npm install && npm run
+> build` inside it, then `zcode plugins marketplace add <clone>/dist/market`
+> and `zcode plugins install agy-delegate@agy-local --scope user`. Follow
+> plugin/README.md to register the model gateway as a ZCode custom
+> anthropic-messages provider, restart ZCode, and verify with `agy_models`.
+
+The repository is self-contained: the shared DSH modules are vendored under
+`shared/` (MIT, [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)),
+so a plain clone builds without any parent project. After code changes,
+`npm test` runs the full offline suite against a fake agy.
+
 ## Build & test
 
 ```bash
