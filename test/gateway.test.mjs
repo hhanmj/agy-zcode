@@ -102,6 +102,7 @@ function parseSse(text) {
 }
 
 const user = (text) => ({ role: 'user', content: text })
+const textOf = (json) => json.content.find((block) => block.type === 'text').text
 
 test('health answers without auth; /v1/messages requires the token', async (t) => {
   const { base, post } = await startGateway(t)
@@ -122,17 +123,18 @@ test('non-streaming request returns an Anthropic message with usage; agy runs in
   assert.equal(json.type, 'message')
   assert.equal(json.role, 'assistant')
   assert.equal(json.stop_reason, 'end_turn')
-  assert.equal(json.content.length, 1)
-  assert.equal(json.content[0].type, 'text')
-  assert.match(json.content[0].text, /^Echo: hello WRITE=made\.txt/)
+  assert.equal(json.content.length, 2)
+  assert.equal(json.content[0].type, 'thinking')
+  assert.match(json.content[0].thinking, /^Thinking about:/)
+  assert.equal(json.content[1].type, 'text')
+  assert.match(json.content[1].text, /^Echo: hello WRITE=made\.txt/)
   assert.equal(json.usage.input_tokens, 10)
   assert.equal(json.usage.output_tokens, 5)
   assert.ok(existsSync(join(workspace, 'made.txt')), 'agy must work in the gateway cwd')
   const [invocation] = calls()
-  assert.ok(invocation.args.includes('--model') && invocation.args[invocation.args.indexOf('--model') + 1] === 'gemini-3.8-flash')
-  assert.equal(invocation.args[invocation.args.indexOf('--effort') + 1], 'high')
-  assert.equal(invocation.args[invocation.args.indexOf('--output-format') + 1], 'stream-json')
-  assert.ok(invocation.args.includes('--dangerously-skip-permissions'))
+  assert.deepEqual(invocation.args, ['acp'])
+  assert.equal(invocation.model, 'gemini-3.8-flash')
+  assert.equal(invocation.effort, 'high')
   assert.match(invocation.prompt, /^hello WRITE=made\.txt/)
 })
 
@@ -145,8 +147,12 @@ test('streaming request emits the full Anthropic SSE sequence', async (t) => {
   assert.ok(names.includes('content_block_start'))
   assert.ok(names.includes('content_block_stop'))
   assert.equal(names[names.length - 1], 'message_stop')
-  const deltas = events.filter((entry) => entry.event === 'content_block_delta')
+  const deltas = events.filter((entry) => entry.event === 'content_block_delta' && entry.data.delta.type === 'text_delta')
   assert.ok(deltas.length >= 2, 'fake agy emits two text deltas')
+  const thinking = events.filter((entry) => entry.event === 'content_block_delta' && entry.data.delta.type === 'thinking_delta')
+  assert.ok(thinking.length >= 1, 'ACP thought chunks become thinking deltas')
+  const firstBlock = events.find((entry) => entry.event === 'content_block_start')
+  assert.equal(firstBlock.data.content_block.type, 'thinking')
   const text = deltas.map((entry) => entry.data.delta.text).join('')
   assert.match(text, /^Echo: stream me/)
   const messageDelta = events.find((entry) => entry.event === 'message_delta')
@@ -164,13 +170,14 @@ test('second turn resumes the stored agy conversation and sends only the new mes
   assert.equal(first.status, 200)
   const second = await post({
     model: 'gemini-3.8-flash',
-    messages: [user('first turn'), { role: 'assistant', content: first.json.content[0].text }, user('second turn')],
+    messages: [user('first turn'), { role: 'assistant', content: textOf(first.json) }, user('second turn')],
   })
   assert.equal(second.status, 200, JSON.stringify(second.json))
-  assert.match(second.json.content[0].text, /Echo: second turn \(resumed conv-/)
+  assert.match(textOf(second.json), /Echo: second turn \(resumed conv-/)
   const [firstCall, secondCall] = calls()
-  assert.ok(!firstCall.args.includes('--conversation'))
-  assert.equal(secondCall.args[secondCall.args.indexOf('--conversation') + 1], firstCall.conversation)
+  assert.equal(firstCall.resumed, false)
+  assert.equal(secondCall.conversation, firstCall.conversation)
+  assert.equal(secondCall.resumed, true)
   assert.equal(secondCall.prompt, 'second turn')
 })
 
@@ -178,14 +185,14 @@ test('a completed follow-up consumes its prior history; branching replays instea
   const { calls, post } = await startGateway(t, { AGY_MCP_AVOID_BROWSER: 'false', AGY_MCP_AVOID_LARGE_READS: 'false' })
   const first = await post({ model: 'gemini-3.8-flash', messages: [user('first')] })
   assert.equal(first.status, 200)
-  const prefix = [user('first'), { role: 'assistant', content: first.json.content[0].text }]
+  const prefix = [user('first'), { role: 'assistant', content: textOf(first.json) }]
   const second = await post({ model: 'gemini-3.8-flash', messages: [...prefix, user('second')] })
   assert.equal(second.status, 200)
   const branch = await post({ model: 'gemini-3.8-flash', messages: [...prefix, user('different branch')] })
   assert.equal(branch.status, 200)
   const [initialCall, resumedCall, branchCall] = calls()
-  assert.equal(resumedCall.args[resumedCall.args.indexOf('--conversation') + 1], initialCall.conversation)
-  assert.ok(!branchCall.args.includes('--conversation'))
+  assert.equal(resumedCall.conversation, initialCall.conversation)
+  assert.notEqual(branchCall.conversation, initialCall.conversation)
   assert.match(branchCall.prompt, /\[Conversation history\]/)
 })
 
@@ -195,7 +202,7 @@ test('model and valid request workspace are part of the resume route', async (t)
   mkdirSync(other)
   const first = await post({ model: 'gemini-3.8-flash', messages: [user('first')], system: '<env>\nWorking directory: ' + other + '\n</env>' })
   assert.equal(first.status, 200)
-  const history = [user('first'), { role: 'assistant', content: first.json.content[0].text }, user('second')]
+  const history = [user('first'), { role: 'assistant', content: textOf(first.json) }, user('second')]
   const differentModel = await post({ model: 'claude-sonnet-4-6', messages: history, system: '<env>\nWorking directory: ' + other + '\n</env>' })
   assert.equal(differentModel.status, 200)
   const differentWorkspace = await post({ model: 'gemini-3.8-flash', messages: history })
@@ -204,8 +211,8 @@ test('model and valid request workspace are part of the resume route', async (t)
   assert.equal(fallback.status, 200)
   const [initialCall, modelCall, cwdCall, fallbackCall] = calls()
   assert.equal(initialCall.cwd, other)
-  assert.ok(!modelCall.args.includes('--conversation'))
-  assert.ok(!cwdCall.args.includes('--conversation'))
+  assert.notEqual(modelCall.conversation, initialCall.conversation)
+  assert.notEqual(cwdCall.conversation, initialCall.conversation)
   assert.equal(cwdCall.cwd, workspace)
   assert.equal(fallbackCall.cwd, workspace)
 })
@@ -219,7 +226,8 @@ test('unknown history prefix falls back to a transcript prompt without --convers
   })
   assert.equal(status, 200)
   const [invocation] = calls()
-  assert.ok(!invocation.args.includes('--conversation'))
+  assert.deepEqual(invocation.args, ['acp'])
+  assert.equal(invocation.resumed, false)
   assert.match(invocation.prompt, /\[Conversation history\]/)
   assert.match(invocation.prompt, /User: earlier/)
   assert.match(invocation.prompt, /Assistant: different answer/)
@@ -240,16 +248,37 @@ test('agy failures map to Anthropic errors (HTTP before streaming, SSE event aft
   assert.equal(failedStream.events[failedStream.events.length - 1].event !== 'message_stop', true, 'no message_stop after an error')
 })
 
-test('oversized prompts travel over stdin (stream-json input)', async (t) => {
-  // Suffixes off so the logged prompt equals what the gateway received verbatim.
-  const { calls, post } = await startGateway(t, { AGY_MCP_AVOID_BROWSER: 'false', AGY_MCP_AVOID_LARGE_READS: 'false' })
+test('oversized prompts travel over ACP stdin intact', async (t) => {
+  const { calls, post } = await startGateway(t)
   const long = 'x'.repeat(31_000) + ' tail'
   const { status, json } = await post({ model: 'gemini-3.8-flash', messages: [user(long)] })
   assert.equal(status, 200)
-  assert.match(json.content[0].text, /^Echo: x{20}/)
+  assert.match(textOf(json), /^Echo: x{20}/)
+  const [invocation] = calls()
+  assert.deepEqual(invocation.args, ['acp'])
+  assert.equal(invocation.prompt, long)
+})
+
+test('ACP-unavailable agents fall back to stream-json print mode', async (t) => {
+  // Suffixes off so the logged prompt equals what the gateway received verbatim.
+  const { calls, post } = await startGateway(t, { FAKE_AGY_NO_ACP: '1', AGY_MCP_AVOID_BROWSER: 'false', AGY_MCP_AVOID_LARGE_READS: 'false' })
+  const long = 'x'.repeat(31_000) + ' tail'
+  const { status, json } = await post({ model: 'gemini-3.8-flash', messages: [user(long)] })
+  assert.equal(status, 200)
+  assert.match(textOf(json), /^Echo: x{20}/)
   const [invocation] = calls()
   assert.equal(invocation.args[invocation.args.indexOf('--input-format') + 1], 'stream-json')
   assert.equal(invocation.prompt, long)
+})
+
+test('thinking disabled requests suppress thinking blocks', async (t) => {
+  const { post, postStream } = await startGateway(t)
+  const { status, json } = await post({ model: 'gemini-3.8-flash', thinking: { type: 'disabled' }, messages: [user('quiet')] })
+  assert.equal(status, 200)
+  assert.equal(json.content.length, 1)
+  assert.equal(json.content[0].type, 'text')
+  const streamed = await postStream({ model: 'gemini-3.8-flash', thinking: { type: 'disabled' }, messages: [user('quiet stream')] })
+  assert.ok(!streamed.events.some((entry) => entry.event === 'content_block_start' && entry.data.content_block.type === 'thinking'))
 })
 
 test('client abort cancels the run and the gateway keeps serving', async (t) => {
@@ -273,7 +302,7 @@ test('client abort cancels the run and the gateway keeps serving', async (t) => 
   await sleep(300)
   const after = await post({ model: 'gemini-3.8-flash', messages: [user('still alive')] })
   assert.equal(after.status, 200)
-  assert.match(after.json.content[0].text, /still alive/)
+  assert.match(textOf(after.json), /still alive/)
 })
 
 test('unknown model ids are rejected with an invalid_request_error', async (t) => {

@@ -162,6 +162,8 @@ test('the gateway uses gateway-tasks.json and migrates its own records out of ta
     body: JSON.stringify({ model: 'gemini-3.8-flash', messages: [{ role: 'user', content: 'fresh chat' }] }),
   })
   assert.equal(res.status, 200, await res.clone().text())
-  assert.equal(Object.keys(registry(dataDir, 'gateway-tasks.json')).length, 2, 'new chat recorded in the gateway registry')
+  // ACP chats keep their own in-memory sessions and are not runner tasks, so
+  // chat traffic leaves both registries untouched.
+  assert.deepEqual(Object.keys(registry(dataDir, 'gateway-tasks.json')), ['agy-gw-1'], 'ACP chats add no runner task records')
   assert.deepEqual(Object.keys(registry(dataDir)), ['agy-mcp-1'], 'tasks.json untouched by chat traffic')
 })

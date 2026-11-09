@@ -598,6 +598,11 @@ export class AgyRunner {
   baseEnv(): Record<string, string> {
     const env = scrubbedEnv()
     applyProxyEnv(env, this.resolveProxy())
+    // Headless probes must not spawn agy's bg-updater: on Windows it opens a
+    // visible Windows Terminal/ConPTY window (flash). Manual `agy update` and
+    // interactive terminal sessions are unaffected. The value must be the
+    // literal string 'true'; agy ignores '1'.
+    env.AGY_CLI_DISABLE_AUTO_UPDATE = 'true'
     return env
   }
 

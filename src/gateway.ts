@@ -15,17 +15,22 @@
  *   rides in SSE comments so it never pollutes the conversation history.
  * - Multi-turn requests replay a transcript, or resume a stored agy
  *   conversation when the prior history hashes match exactly.
+ * - Requests are served over ACP (agy acp) so agent_thought_chunk updates can
+ *   be surfaced as Anthropic thinking blocks; the stream-json print mode drops
+ *   thought content entirely. The legacy stream-json path remains as a
+ *   fallback when ACP is unavailable.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AgyStreamEvent, AgyUsage } from '../../src/stream-events.js'
-import { AgyModelSelectionError } from '../../src/models.js'
+import { AgyModelSelectionError, resolveSelection } from '../../src/models.js'
 import type { RunnerConfig } from './config.js'
+import { resolveAgy } from './proc.js'
 import { AgyRunner, validateWorkspace, type AgyRun } from './runner.js'
 
 declare const __AGY_MCP_VERSION__: string
@@ -338,7 +343,423 @@ function toolActivity(event: Extract<AgyStreamEvent, { kind: 'step' }>): string 
   return undefined
 }
 
+// ── ACP transport: streams agy thoughts as Anthropic thinking blocks ────────
+// agy's stream-json print mode drops thought content (only usage counters
+// survive); the ACP protocol emits agent_thought_chunk session updates. One
+// persistent `agy acp` child serves all gateway requests, one ACP session per
+// conversation prefix, so multi-turn chats keep server-side context.
+
+const ACP_PROMPT_TIMEOUT_MS = 30 * 60 * 1000
+const MAX_ACP_SESSION_ENTRIES = 256
+
+class AcpUnavailableError extends Error {}
+
+interface AcpRpcMessage {
+  id?: number | string
+  method?: string
+  params?: Record<string, unknown>
+  result?: unknown
+  error?: { code?: number; message?: string }
+}
+
+interface AcpSessionInfo {
+  sessionId: string
+  configOptions?: { id: string; currentValue?: string; options?: { value: string }[] }[]
+}
+
+interface AcpPromptResult {
+  stopReason?: string
+  usage?: { inputTokens?: number; outputTokens?: number }
+}
+
+class AcpClient {
+  private child: ChildProcess | null = null
+  private ready: Promise<void> | null = null
+  private nextId = 1
+  private buffer = ''
+  private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
+  private readonly handlers = new Map<string, (update: Record<string, unknown> | undefined) => void>()
+  private readonly hashSessions = new Map<string, { sessionId: string; model: string; cwd: string }>()
+  private readonly log: (message: string) => void
+
+  constructor(private readonly options: GatewayOptions) {
+    this.log = options.log ?? (() => {})
+  }
+
+  ensure(): Promise<void> {
+    if (this.child !== null && this.ready !== null) return this.ready
+    this.buffer = ''
+    const env = this.options.runner.baseEnv()
+    const exe = resolveAgy(this.options.config.command, env)
+    const child = spawn(exe, [...this.options.config.commandPrefixArgs, 'acp'], {
+      cwd: tmpdir(),
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: false,
+    })
+    this.child = child
+    child.stdout!.setEncoding('utf8')
+    child.stdout!.on('data', (chunk: string) => this.onData(chunk))
+    child.stderr!.setEncoding('utf8')
+    child.stderr!.on('data', () => {})
+    const cleanup = (why: string): void => {
+      if (this.child !== child) return
+      this.child = null
+      this.ready = null
+      const err = new Error('agy acp ' + why)
+      for (const p of this.pending.values()) {
+        clearTimeout(p.timer)
+        p.reject(err)
+      }
+      this.pending.clear()
+      this.handlers.clear()
+      this.hashSessions.clear()
+      this.log('gateway-acp: ' + why)
+    }
+    child.once('exit', (code) => cleanup('exited (' + String(code) + ')'))
+    child.once('error', (err) => cleanup('failed to start: ' + String(err)))
+    this.ready = this.request('initialize', { protocolVersion: 1, clientCapabilities: {} }, 30_000)
+      .then(() => {})
+      .catch((err: unknown) => {
+        try {
+          child.kill()
+        } catch {
+          // already gone
+        }
+        throw err
+      })
+    return this.ready
+  }
+
+  /** Like ConversationMap.find: model and workspace are part of the resume route. */
+  sessionFor(hash: string, model: string, cwd: string): string | undefined {
+    const entry = this.hashSessions.get(hash)
+    if (entry === undefined || entry.model !== model) return undefined
+    if (entry.cwd.toLowerCase() !== cwd.toLowerCase()) return undefined
+    return entry.sessionId
+  }
+
+  /** A completed follow-up consumes its prior prefix so branches replay a transcript. */
+  rememberSession(hash: string, sessionId: string, model: string, cwd: string, consumedHash?: string): void {
+    if (consumedHash !== undefined && this.hashSessions.get(consumedHash)?.sessionId === sessionId) {
+      this.hashSessions.delete(consumedHash)
+    }
+    this.hashSessions.set(hash, { sessionId, model, cwd })
+    if (this.hashSessions.size > MAX_ACP_SESSION_ENTRIES) {
+      const oldest = this.hashSessions.keys().next().value
+      if (oldest !== undefined) this.hashSessions.delete(oldest)
+    }
+  }
+
+  setHandler(sessionId: string, handler: (update: Record<string, unknown> | undefined) => void): void {
+    this.handlers.set(sessionId, handler)
+  }
+
+  deleteHandler(sessionId: string): void {
+    this.handlers.delete(sessionId)
+  }
+
+  private onData(chunk: string): void {
+    this.buffer += chunk
+    let idx: number
+    while ((idx = this.buffer.indexOf('\n')) >= 0) {
+      const line = this.buffer.slice(0, idx).trim()
+      this.buffer = this.buffer.slice(idx + 1)
+      if (line.length === 0) continue
+      let msg: AcpRpcMessage
+      try {
+        msg = JSON.parse(line) as AcpRpcMessage
+      } catch {
+        continue
+      }
+      this.dispatch(msg)
+    }
+  }
+
+  private dispatch(msg: AcpRpcMessage): void {
+    if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
+      const p = this.pending.get(msg.id as number)
+      if (p !== undefined) {
+        this.pending.delete(msg.id as number)
+        clearTimeout(p.timer)
+        if (msg.error !== undefined) p.reject(new Error(msg.error.message ?? 'acp error ' + String(msg.error.code)))
+        else p.resolve(msg.result)
+      }
+      return
+    }
+    if (msg.method === 'session/update') {
+      const sessionId = typeof msg.params?.sessionId === 'string' ? msg.params.sessionId : undefined
+      const update = isRecord(msg.params?.update) ? msg.params.update : undefined
+      if (sessionId !== undefined) this.handlers.get(sessionId)?.(update)
+      return
+    }
+    if (msg.method === 'session/request_permission' && msg.id !== undefined) {
+      // Match the legacy always-proceed behaviour: approve with the strongest
+      // allow option offered, cancel when nothing is selectable.
+      const opts = Array.isArray(msg.params?.options) ? (msg.params.options as { optionId: string; kind?: string }[]) : []
+      const opt = opts.find((o) => o.kind === 'allow_always') ?? opts.find((o) => o.kind === 'allow_once') ?? opts[0]
+      this.respond(msg.id, { outcome: opt !== undefined ? { outcome: 'selected', optionId: opt.optionId } : { outcome: 'cancelled' } })
+      return
+    }
+    if (msg.id !== undefined && typeof msg.method === 'string') {
+      this.respond(msg.id, undefined, { code: -32601, message: 'unsupported client method: ' + msg.method })
+    }
+  }
+
+  private respond(id: number | string, result: unknown, error?: { code: number; message: string }): void {
+    if (this.child === null) return
+    this.child.stdin!.write(JSON.stringify({ jsonrpc: '2.0', id, ...(error !== undefined ? { error } : { result }) }) + '\n')
+  }
+
+  request(method: string, params: Record<string, unknown>, timeoutMs = 120_000): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (this.child === null) {
+        reject(new Error('agy acp is not running'))
+        return
+      }
+      const id = this.nextId++
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error('acp ' + method + ' timed out'))
+      }, timeoutMs)
+      this.pending.set(id, { resolve, reject, timer })
+      this.child.stdin!.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
+    })
+  }
+
+  notify(method: string, params: Record<string, unknown>): void {
+    if (this.child === null) return
+    try {
+      this.child.stdin!.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n')
+    } catch {
+      // child died between the check and the write; cleanup rejects pending requests
+    }
+  }
+}
+
+let acpClientSingleton: AcpClient | undefined
+
+function getAcpClient(options: GatewayOptions): AcpClient {
+  acpClientSingleton ??= new AcpClient(options)
+  return acpClientSingleton
+}
+
 async function handleMessages(options: GatewayOptions, body: Record<string, unknown>, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    await handleMessagesAcp(options, body, req, res)
+  } catch (error) {
+    if (error instanceof AcpUnavailableError && !res.headersSent) {
+      (options.log ?? (() => {}))('gateway: ACP unavailable (' + error.message + '); using stream-json fallback')
+      await handleMessagesLegacy(options, body, req, res)
+      return
+    }
+    throw error
+  }
+}
+
+async function handleMessagesAcp(options: GatewayOptions, body: Record<string, unknown>, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { runner, cwd: configuredCwd, log = () => {} } = options
+  const requestCwd = requestWorkspace(body.system, configuredCwd)
+  const model = typeof body.model === 'string' ? body.model.trim() : ''
+  if (model.length === 0) throw new GatewayHttpError(400, 'invalid_request_error', '"model" is required')
+  const stream = body.stream === true
+  const turns = turnsOf(body.messages)
+  const last = turns[turns.length - 1]
+  if (last.text.trim().length === 0) {
+    throw new GatewayHttpError(400, 'invalid_request_error', 'the final message contains no text content (agy has no image input on this path)')
+  }
+  const wantThinking = !(isRecord(body.thinking) && body.thinking.type === 'disabled')
+
+  let baseModel = model
+  let effort = ''
+  try {
+    const listed = await runner.models.list()
+    const resolved = resolveSelection(listed, model)
+    baseModel = resolved.args.model ?? model
+    effort = resolved.args.effort ?? ''
+  } catch (error) {
+    if (error instanceof AgyModelSelectionError) throw new GatewayHttpError(400, 'invalid_request_error', error.message)
+    log('gateway-acp: cannot validate model ' + model + ' (' + String(error) + '); passing it to agy unvalidated')
+  }
+
+  const acp = getAcpClient(options)
+  try {
+    await acp.ensure()
+  } catch (error) {
+    throw new AcpUnavailableError(error instanceof Error ? error.message : String(error))
+  }
+
+  const consumedHash = historyHash(turns.slice(0, -1))
+  let sessionId = acp.sessionFor(consumedHash, model, requestCwd)
+  let resumed = sessionId !== undefined
+  let promptText = resumed ? last.text : transcriptPrompt(turns)
+
+  const createSession = async (): Promise<void> => {
+    const created = await acp.request('session/new', { cwd: requestCwd, mcpServers: [] }, 60_000) as AcpSessionInfo
+    sessionId = created.sessionId
+    const modelOpt = (created.configOptions ?? []).find((o) => o.id === 'model')
+    const values = (modelOpt?.options ?? []).map((o) => o.value)
+    const target = values.includes(baseModel) ? baseModel
+      : effort.length > 0 && values.includes(baseModel + '-' + effort) ? baseModel + '-' + effort
+      : undefined
+    if (target !== undefined && target !== modelOpt?.currentValue) {
+      try {
+        await acp.request('session/set_config_option', { sessionId, configId: 'model', value: target }, 30_000)
+      } catch (error) {
+        log('gateway-acp: set model failed: ' + String(error))
+      }
+    }
+    if (effort.length > 0) {
+      try {
+        await acp.request('session/set_config_option', { sessionId, configId: 'thought_level', value: effort }, 30_000)
+      } catch (error) {
+        log('gateway-acp: set thought_level failed: ' + String(error))
+      }
+    }
+  }
+  if (!resumed) {
+    try {
+      await createSession()
+    } catch (error) {
+      throw new AcpUnavailableError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  if (stream) {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+    sseEvent(res, 'message_start', {
+      type: 'message_start',
+      message: { id: 'msg_agy_' + String(sessionId), type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+    })
+  }
+
+  let blockIndex = -1
+  let openKind: 'thinking' | 'text' | null = null
+  let streamedText = ''
+  let streamedThinking = ''
+  let finished = false
+  const closeBlock = (): void => {
+    if (openKind === null) return
+    if (stream && !res.destroyed) sseEvent(res, 'content_block_stop', { type: 'content_block_stop', index: blockIndex })
+    openKind = null
+  }
+  const openBlock = (kind: 'thinking' | 'text'): void => {
+    closeBlock()
+    blockIndex++
+    openKind = kind
+    if (stream && !res.destroyed) {
+      sseEvent(res, 'content_block_start', {
+        type: 'content_block_start',
+        index: blockIndex,
+        content_block: kind === 'thinking' ? { type: 'thinking', thinking: '' } : { type: 'text', text: '' },
+      })
+    }
+  }
+  const sendThinking = (text: string): void => {
+    if (text.length === 0) return
+    streamedThinking += text
+    if (!wantThinking) return
+    if (openKind !== 'thinking') openBlock('thinking')
+    if (stream && !res.destroyed) sseEvent(res, 'content_block_delta', { type: 'content_block_delta', index: blockIndex, delta: { type: 'thinking_delta', thinking: text } })
+  }
+  const sendText = (text: string): void => {
+    if (text.length === 0) return
+    streamedText += text
+    if (openKind !== 'text') openBlock('text')
+    if (stream && !res.destroyed) sseEvent(res, 'content_block_delta', { type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text } })
+  }
+  const onUpdate = (update: Record<string, unknown> | undefined): void => {
+    const kind = update?.sessionUpdate
+    const content = isRecord(update?.content) ? update.content : undefined
+    if (kind === 'agent_thought_chunk') sendThinking(typeof content?.text === 'string' ? content.text : '')
+    else if (kind === 'agent_message_chunk') sendText(typeof content?.text === 'string' ? content.text : '')
+    else if ((kind === 'tool_call' || kind === 'tool_call_update') && stream && !res.destroyed) {
+      sseComment(res, 'agy tool ' + String(update?.title ?? update?.toolCallId ?? 'tool') + ' ' + String(update?.status ?? ''))
+    }
+  }
+  acp.setHandler(String(sessionId), onUpdate)
+  const ping = stream
+    ? setInterval(() => {
+        if (!res.destroyed) res.write('event: ping\ndata: {"type":"ping"}\n\n')
+      }, PING_MS)
+    : undefined
+  res.on('close', () => {
+    if (!finished) acp.notify('session/cancel', { sessionId: String(sessionId) })
+  })
+  const fail = (message: string): void => {
+    log('gateway-acp: ' + message)
+    if (!res.headersSent) respondJson(res, 500, anthropicError('api_error', message))
+    else if (stream && !res.destroyed) {
+      closeBlock()
+      sseEvent(res, 'error', anthropicError('api_error', message))
+      res.end()
+    } else if (!res.destroyed) res.end()
+  }
+
+  let result: AcpPromptResult
+  try {
+    try {
+      result = await acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: promptText }] }, ACP_PROMPT_TIMEOUT_MS) as AcpPromptResult
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (resumed && /unknown|not found|no such|expired|invalid session/i.test(msg)) {
+        log('gateway-acp: stale session, starting fresh (' + msg + ')')
+        acp.deleteHandler(String(sessionId))
+        resumed = false
+        promptText = transcriptPrompt(turns)
+        await createSession()
+        acp.setHandler(String(sessionId), onUpdate)
+        result = await acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: promptText }] }, ACP_PROMPT_TIMEOUT_MS) as AcpPromptResult
+      } else {
+        if (/timed out/i.test(msg)) acp.notify('session/cancel', { sessionId: String(sessionId) })
+        throw error
+      }
+    }
+  } catch (error) {
+    finished = true
+    if (ping !== undefined) clearInterval(ping)
+    acp.deleteHandler(String(sessionId))
+    fail(error instanceof Error ? error.message : String(error))
+    return
+  }
+  finished = true
+  if (ping !== undefined) clearInterval(ping)
+  acp.deleteHandler(String(sessionId))
+  if (res.destroyed) return
+  acp.rememberSession(historyHash([...turns, { role: 'assistant', text: streamedText }]), String(sessionId), model, requestCwd, resumed ? consumedHash : undefined)
+  const usage = {
+    input_tokens: typeof result.usage?.inputTokens === 'number' ? result.usage.inputTokens : 0,
+    output_tokens: typeof result.usage?.outputTokens === 'number' ? result.usage.outputTokens : 0,
+  }
+  closeBlock()
+  if (stream) {
+    sseEvent(res, 'message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage })
+    sseEvent(res, 'message_stop', { type: 'message_stop' })
+    res.end()
+  } else {
+    const content: Record<string, unknown>[] = []
+    if (wantThinking && streamedThinking.length > 0) content.push({ type: 'thinking', thinking: streamedThinking })
+    content.push({ type: 'text', text: streamedText })
+    respondJson(res, 200, {
+      id: 'msg_agy_' + String(sessionId),
+      type: 'message',
+      role: 'assistant',
+      model,
+      content,
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage,
+    })
+  }
+}
+
+async function handleMessagesLegacy(options: GatewayOptions, body: Record<string, unknown>, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const { runner, config, cwd: configuredCwd, log = () => {} } = options
   const requestCwd = requestWorkspace(body.system, configuredCwd)
   const model = typeof body.model === 'string' ? body.model.trim() : ''
