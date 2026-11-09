@@ -38,7 +38,8 @@ const VERSION = typeof __AGY_MCP_VERSION__ === 'string' ? __AGY_MCP_VERSION__ : 
 
 export const DEFAULT_GATEWAY_PORT = 8378
 const MAX_BODY_BYTES = 64 << 20
-const PING_MS = 15_000
+/** SSE keep-alive interval; AGY_GATEWAY_PING_MS overrides it (tests shrink it to assert pings). */
+export const PING_MS = Number(process.env.AGY_GATEWAY_PING_MS) > 0 ? Number(process.env.AGY_GATEWAY_PING_MS) : 15_000
 const MAX_CONVERSATION_ENTRIES = 200
 const AUTOSTART_WAIT_MS = 8_000
 
@@ -308,6 +309,25 @@ function sseComment(res: ServerResponse, text: string): void {
   res.write(': ' + text.replace(/\s+/g, ' ').slice(0, 160) + '\n\n')
 }
 
+/**
+ * Periodic SSE pings for the whole life of a streaming response, including the
+ * window before the first model output. ZCode kills a stream that stays idle
+ * for 5 minutes (stream idle timeout); a long agy cold start or a long
+ * thinking phase with no chunk yet would otherwise look dead. Returns a stop
+ * function (idempotent) — always call it when the response ends.
+ */
+function startSsePing(res: ServerResponse): () => void {
+  const timer = setInterval(() => {
+    if (!res.destroyed) res.write('event: ping\ndata: {"type":"ping"}\n\n')
+  }, PING_MS)
+  let stopped = false
+  return () => {
+    if (stopped) return
+    stopped = true
+    clearInterval(timer)
+  }
+}
+
 // ── The gateway server ──────────────────────────────────────────────────────
 
 function respondJson(res: ServerResponse, status: number, body: unknown): void {
@@ -571,6 +591,25 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
   }
   const wantThinking = !(isRecord(body.thinking) && body.thinking.type === 'disabled')
 
+  // Start the stream (and its keep-alive pings) BEFORE any slow setup work:
+  // acp ensure/session setup, model validation and agy cold start can all take
+  // minutes, and ZCode's stream idle watchdog would kill a silent response.
+  // Fast request-level validation above still throws before this, so
+  // malformed requests keep their clean JSON error responses.
+  const stopPing = stream ? startSsePing(res) : undefined
+  if (stream && !res.headersSent) {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+    sseEvent(res, 'message_start', {
+      type: 'message_start',
+      message: { id: 'msg_agy_pending', type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+    })
+  }
+
   let baseModel = model
   let effort = ''
   try {
@@ -579,7 +618,17 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
     baseModel = resolved.args.model ?? model
     effort = resolved.args.effort ?? ''
   } catch (error) {
-    if (error instanceof AgyModelSelectionError) throw new GatewayHttpError(400, 'invalid_request_error', error.message)
+    if (error instanceof AgyModelSelectionError) {
+      // The stream may already be open (early headers for the idle watchdog):
+      // report through SSE instead of falling back to a bare res.end().
+      stopPing?.()
+      if (stream && res.headersSent) {
+        sseEvent(res, 'error', anthropicError('invalid_request_error', error.message))
+        res.end()
+        return
+      }
+      throw new GatewayHttpError(400, 'invalid_request_error', error.message)
+    }
     log('gateway-acp: cannot validate model ' + model + ' (' + String(error) + '); passing it to agy unvalidated')
   }
   // ZCode's reasoningLevel selector arrives as an Anthropic thinking budget
@@ -594,6 +643,16 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
   try {
     await acp.ensure()
   } catch (error) {
+    stopPing?.()
+    if (stream && res.headersSent) {
+      // Headers are already out, so the legacy fallback (which would restart
+      // the response) is impossible: report the failure over SSE instead.
+      const detail = error instanceof Error ? error.message : String(error)
+      log('gateway-acp: unavailable after stream start (' + detail + '); reporting over SSE')
+      sseEvent(res, 'error', anthropicError('api_error', 'agy acp unavailable: ' + detail))
+      res.end()
+      return
+    }
     throw new AcpUnavailableError(error instanceof Error ? error.message : String(error))
   }
 
@@ -629,11 +688,21 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
     try {
       await createSession()
     } catch (error) {
+      stopPing?.()
+      if (stream && res.headersSent) {
+        const detail = error instanceof Error ? error.message : String(error)
+        log('gateway-acp: session setup failed after stream start (' + detail + '); reporting over SSE')
+        sseEvent(res, 'error', anthropicError('api_error', 'agy acp session setup failed: ' + detail))
+        res.end()
+        return
+      }
       throw new AcpUnavailableError(error instanceof Error ? error.message : String(error))
     }
   }
 
-  if (stream) {
+  if (stream && !res.headersSent) {
+    // Only reached if an error above threw before the early writeHead and the
+    // caller still wants a stream: keep the original late-start fallback.
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -691,11 +760,6 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
     }
   }
   acp.setHandler(String(sessionId), onUpdate)
-  const ping = stream
-    ? setInterval(() => {
-        if (!res.destroyed) res.write('event: ping\ndata: {"type":"ping"}\n\n')
-      }, PING_MS)
-    : undefined
   res.on('close', () => {
     if (!finished) acp.notify('session/cancel', { sessionId: String(sessionId) })
   })
@@ -710,11 +774,17 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
   }
 
   let result: AcpPromptResult
+  // If the client gave up (idle watchdog, user stop), do not keep the agy turn
+  // waiting on a dead response: race the prompt against connection close.
+  const clientGone = new Promise<never>((_, reject) => {
+    res.once('close', () => reject(new Error('client disconnected; agy turn abandoned')))
+  })
   try {
     try {
-      result = await acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: promptText }] }, ACP_PROMPT_TIMEOUT_MS) as AcpPromptResult
+      result = await Promise.race([acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: promptText }] }, ACP_PROMPT_TIMEOUT_MS) as Promise<AcpPromptResult>, clientGone])
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
+      if (res.destroyed) throw error
       if (resumed && /unknown|not found|no such|expired|invalid session/i.test(msg)) {
         log('gateway-acp: stale session, starting fresh (' + msg + ')')
         acp.deleteHandler(String(sessionId))
@@ -722,7 +792,7 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
         promptText = transcriptPrompt(turns)
         await createSession()
         acp.setHandler(String(sessionId), onUpdate)
-        result = await acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: promptText }] }, ACP_PROMPT_TIMEOUT_MS) as AcpPromptResult
+        result = await Promise.race([acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: promptText }] }, ACP_PROMPT_TIMEOUT_MS) as Promise<AcpPromptResult>, clientGone]) as AcpPromptResult
       } else {
         if (/timed out/i.test(msg)) acp.notify('session/cancel', { sessionId: String(sessionId) })
         throw error
@@ -730,13 +800,13 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
     }
   } catch (error) {
     finished = true
-    if (ping !== undefined) clearInterval(ping)
+    stopPing?.()
     acp.deleteHandler(String(sessionId))
     fail(error instanceof Error ? error.message : String(error))
     return
   }
   finished = true
-  if (ping !== undefined) clearInterval(ping)
+  stopPing?.()
   acp.deleteHandler(String(sessionId))
   if (res.destroyed) return
   acp.rememberSession(historyHash([...turns, { role: 'assistant', text: streamedText }]), String(sessionId), model, requestCwd, resumed ? consumedHash : undefined)
@@ -847,11 +917,7 @@ async function handleMessagesLegacy(options: GatewayOptions, body: Record<string
       usage.observe(event.usage, true)
     }
   })
-  const ping = stream
-    ? setInterval(() => {
-        if (!res.destroyed) res.write('event: ping\ndata: {"type":"ping"}\n\n')
-      }, PING_MS)
-    : undefined
+  const stopPing = stream ? startSsePing(res) : undefined
   res.on('close', () => {
     if (!finished) run.cancel()
   })
@@ -859,7 +925,7 @@ async function handleMessagesLegacy(options: GatewayOptions, body: Record<string
     await run.done
   } finally {
     unsubscribe()
-    if (ping !== undefined) clearInterval(ping)
+    stopPing?.()
   }
   finished = true
 

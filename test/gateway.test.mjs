@@ -163,6 +163,24 @@ test('streaming request emits the full Anthropic SSE sequence', async (t) => {
   assert.equal(start.data.message.role, 'assistant')
 })
 
+test('streaming pings cover the silent window before the first model output', async (t) => {
+  // PING_MS shrunk to 200ms via env; fake agy sleeps 600ms before its first
+  // chunk, so at least one ping must arrive between message_start and the
+  // first content_block_* — this is what keeps ZCode's 5-minute stream idle
+  // watchdog from killing a slow agy cold start.
+  const { postStream } = await startGateway(t, { AGY_GATEWAY_PING_MS: '200' })
+  const { status, events } = await postStream({ model: 'gemini-3.8-flash', messages: [user('ping me SLEEP=600')] })
+  assert.equal(status, 200)
+  const names = events.map((entry) => entry.event)
+  const firstContent = names.findIndex((name) => name === 'content_block_start')
+  assert.ok(firstContent >= 0, 'stream completed normally')
+  const pingsBeforeContent = names.slice(0, firstContent).filter((name) => name === 'ping')
+  assert.ok(pingsBeforeContent.length >= 1, 'at least one ping before the first content block; events: ' + names.join(','))
+  const pingAfterStart = names.indexOf('ping') > names.indexOf('message_start')
+  assert.ok(pingAfterStart, 'pings start after message_start')
+  assert.equal(names[names.length - 1], 'message_stop', 'stream still completes cleanly')
+})
+
 test('second turn resumes the stored agy conversation and sends only the new message', async (t) => {
   // Suffixes off so the logged follow-up prompt equals the raw message text.
   const { calls, post } = await startGateway(t, { AGY_MCP_AVOID_BROWSER: 'false', AGY_MCP_AVOID_LARGE_READS: 'false' })

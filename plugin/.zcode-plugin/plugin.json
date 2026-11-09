@@ -1,6 +1,6 @@
 {
   "name": "agy-delegate",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Delegate coding tasks to Google Antigravity CLI (agy) from ZCode: foreground or background runs, follow-ups in the same agy conversation, cancel, independent change evidence and execution traces. Also runs a local Anthropic-compatible model gateway so agy models can be registered as ZCode custom providers and used by native subagents.",
   "description_i18n": {
     "en": "Delegate coding tasks to Google Antigravity CLI (agy) from ZCode: foreground or background runs, follow-ups in the same agy conversation, cancel, independent change evidence and execution traces. Also runs a local Anthropic-compatible model gateway so agy models can be registered as ZCode custom providers and used by native subagents.",

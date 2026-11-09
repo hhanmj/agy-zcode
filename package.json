@@ -1,7 +1,7 @@
 {
   "name": "agy-zcode-plugin-build",
   "private": true,
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Builds the ZCode plugin (MCP server) that delegates tasks to Google Antigravity CLI (agy).",
   "type": "module",
   "scripts": {
