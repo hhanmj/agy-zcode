@@ -582,6 +582,13 @@ async function handleMessagesAcp(options: GatewayOptions, body: Record<string, u
     if (error instanceof AgyModelSelectionError) throw new GatewayHttpError(400, 'invalid_request_error', error.message)
     log('gateway-acp: cannot validate model ' + model + ' (' + String(error) + '); passing it to agy unvalidated')
   }
+  // ZCode's reasoningLevel selector arrives as an Anthropic thinking budget
+  // (the provider optionSpec map turns low/medium/high into budget_tokens).
+  // It overrides the model's default effort; without it the default stands.
+  if (isRecord(body.thinking) && body.thinking.type === 'enabled' && typeof body.thinking.budget_tokens === 'number') {
+    const budget = body.thinking.budget_tokens
+    effort = budget <= 4096 ? 'low' : budget <= 16384 ? 'medium' : 'high'
+  }
 
   const acp = getAcpClient(options)
   try {

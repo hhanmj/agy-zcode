@@ -271,6 +271,16 @@ test('ACP-unavailable agents fall back to stream-json print mode', async (t) => 
   assert.equal(invocation.prompt, long)
 })
 
+test('thinking budget maps to the agy thought level', async (t) => {
+  const { calls, post } = await startGateway(t)
+  for (const [budget, level] of [[2048, 'low'], [8192, 'medium'], [24576, 'high']]) {
+    const { status } = await post({ model: 'gemini-3.8-flash', thinking: { type: 'enabled', budget_tokens: budget }, messages: [user('level ' + level)] })
+    assert.equal(status, 200)
+  }
+  const entries = calls()
+  assert.deepEqual(entries.map((entry) => entry.effort), ['low', 'medium', 'high'])
+})
+
 test('thinking disabled requests suppress thinking blocks', async (t) => {
   const { post, postStream } = await startGateway(t)
   const { status, json } = await post({ model: 'gemini-3.8-flash', thinking: { type: 'disabled' }, messages: [user('quiet')] })
